@@ -22,7 +22,7 @@ def initialize_gee():
             'https://www.googleapis.com/auth/earthengine'])
         ee.Initialize(credentials=credentials, opt_url='https://earthengine-highvolume.googleapis.com')
     except Exception as e:
-        st.error(f"❌ GAGAL otentikasi GEE. Pastikan 'gee_credentials' di Streamlit secrets benar. Error: {e}")
+        st.error(f"GAGAL otentikasi GEE. Pastikan 'gee_credentials' di Streamlit secrets benar. Error: {e}")
         st.stop()
 
 @st.cache_data
@@ -81,21 +81,60 @@ with st.sidebar:
 
 # BAGIAN UTAMA
 if run_button:
-    gdf_filtered = gdf_semua_tol[gdf_semua_tol['provinsi'].str.contains(provinsi_input, case=False, na=False)]
-    if gdf_filtered.empty:
-        st.error(f"Tidak ada data jalan tol yang ditemukan untuk Provinsi '{provinsi_input}'.")
+
+    st.header("Hasil Analisis Pemeliharaan Rumput")
+    if gdf_hasil is not None and not gdf_hasil.empty:
+        gdf_hasil = gpd.sjoin_nearest(gdf_hasil, gdf_filtered[['ruas', 'geometry']])
+        gdf_hasil['longitude'] = gdf_hasil.geometry.x
+        gdf_hasil['latitude'] = gdf_hasil.geometry.y
+        st.success(f"Berhasil! Ditemukan {len(gdf_hasil)} titik lokasi prioritas.")
+
+        if ndvi_threshold_input >= 0.7:
+            priority_level = "URGENT"
+        elif ndvi_threshold_input >= 0.6:
+            priority_level = "PRIORITAS TINGGI"
+        else:
+            priority_level = "MONITORING"
+        area_ha = len(gdf_hasil) * 0.01
+
+        # Tampilan Tabs
+        tab1, tab2, tab3 = st.tabs(["Ringkasan & Peta", "Detail per Ruas", "Dashboard KPI"])
+
+        with tab1:
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Status Prioritas", priority_level)
+            col2.metric("Total Titik", f"{len(gdf_hasil)} titik")
+            col3.metric("Estimasi Area", f"{area_ha:.2f} ha")
+
+            peta_interaktif = geemap.Map(center=[gdf_hasil.geometry.y.mean(), gdf_hasil.geometry.x.mean()], zoom=12)
+            peta_interaktif.add_gdf(gdf_filtered, layer_name="Jalan Tol")
+            peta_interaktif.add_gdf(gdf_hasil, layer_name="Titik Prioritas", style={'color': 'red'})
+            peta_interaktif.to_streamlit(height=450)
+
+        with tab2:
+            st.subheader("Analisis Kebutuhan per Ruas Tol")
+            ruas_summary = gdf_hasil.groupby('ruas').agg(jumlah_titik=('geometry', 'count'),
+                                                         estimasi_area_ha=('geometry', lambda x: len(
+                                                             x) * 0.01)).reset_index().sort_values('jumlah_titik',
+                                                                                                   ascending=False)
+            st.dataframe(ruas_summary[['ruas', 'jumlah_titik', 'estimasi_area_ha']], use_container_width=True)
+            st.bar_chart(ruas_summary.set_index('ruas')['jumlah_titik'])
+
+        with tab3:
+            st.subheader("Dashboard Key Performance Indicator (KPI)")
+            col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
+            compliance_rate = max(0, 100 - (len(gdf_hasil) / 100))
+            col_kpi1.metric("Tingkat Kepatuhan SPM", f"{compliance_rate:.1f}%")
+            col_kpi2.metric("Beban Kerja", f"{len(gdf_hasil)} titik")
+            col_kpi3.metric("Area Terdampak", f"{area_ha:.2f} ha")
+            st.subheader("Grafik Tren Historis Area Pemeliharaan (Simulasi)")
+            hist_dates = pd.date_range(end=datetime.now(), periods=12, freq='W')
+            hist_data = pd.DataFrame({'Tanggal': hist_dates, 'Estimasi Area (ha)': np.maximum(0,
+                                                                                              np.linspace(area_ha * 1.5,
+                                                                                                          area_ha,
+                                                                                                          12) + np.random.normal(
+                                                                                                  0, area_ha * 0.1,
+                                                                                                  12))}).set_index('Tanggal')
+            st.area_chart(hist_data)
     else:
-        with st.spinner("Menganalisis area prioritas..."):
-            aoi_main = geemap.geopandas_to_ee(gdf_filtered).geometry().dissolve().buffer(buffer_radius_input)
-            gdf_hasil, img_count = run_gee_analysis(aoi_main, start_date_input, end_date_input, cloud_cover_input,
-                                                    ndvi_threshold_input)
-
-            st.write(f"Ditemukan {img_count} citra satelit yang relevan.")
-
-            if gdf_hasil is not None and not gdf_hasil.empty:
-                st.success(f"Berhasil! Ditemukan {len(gdf_hasil)} titik lokasi prioritas.")
-                st.dataframe(gdf_hasil.head())  # Tampilkan beberapa hasil awal
-            else:
-                st.warning(f"Tidak ditemukan area rumput signifikan (NDVI >= {ndvi_threshold_input}).")
-else:
-    st.info("Silakan atur parameter di sidebar dan klik 'Analisis Kondisi Rumput' untuk memulai.")
+        st.warning(f"Tidak ditemukan area rumput signifikan (NDVI >= {ndvi_threshold_input}).")
